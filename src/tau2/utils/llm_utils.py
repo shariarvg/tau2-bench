@@ -459,6 +459,9 @@ def generate(
         generation_time_seconds=generation_time_seconds,
     )
 
+    history = "\n".join(
+        f"{m.role}: {m.content}" for m in messages if getattr(m, "content", None)
+    )
     log_llm_span(
         name=call_name or model,
         tools_called=[tc.name for tc in tool_calls] if tool_calls else None,
@@ -466,6 +469,7 @@ def generate(
         completion_tokens=usage.get("completion_tokens") if usage else None,
         duration_seconds=generation_time_seconds,
         content=content,
+        history=history or None,
     )
 
     # Log complete LLM call (request + response)

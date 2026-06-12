@@ -198,11 +198,15 @@ def log_tool_span(
     name: str,
     duration_seconds: Optional[float] = None,
     error: Optional[str] = None,
+    arguments: Optional[dict] = None,
+    output: Optional[str] = None,
 ) -> Optional[str]:
     """Log one tool-execution span and return its span_id, or None if tracing is disabled.
 
     Its parent is whichever LLM-call span most recently requested tool calls
-    (tracked via `current_parent_span_id`).
+    (tracked via `current_parent_span_id`). The tool's arguments and output
+    (the `ToolMessage.content`, including error messages) are stored as JSON
+    in the `annotation` column.
     """
     conn = _get_connection()
     if conn is None:
@@ -211,6 +215,8 @@ def log_tool_span(
     span_id = str(uuid.uuid4())
     trace_id = current_trace_id.get()
     parent_span_id = current_parent_span_id.get()
+
+    annotation = {"arguments": arguments, "output": output}
 
     with _db_lock:
         conn.execute(
@@ -229,7 +235,7 @@ def log_tool_span(
                 None,
                 duration_seconds,
                 error,
-                None,
+                json.dumps(annotation),
                 datetime.now().isoformat(),
             ),
         )
@@ -391,5 +397,38 @@ def trace_llm_call(func):
             history=history or None,
         )
         return message
+
+    return wrapper
+
+
+def trace_tool_call(func):
+    """Decorator that logs a tool-call span for each call to `func`.
+
+    Intended for `Environment.get_response`. Reads the tool name and
+    arguments from the `ToolCall` argument, and logs the `ToolMessage`
+    returned: its `content` (the tool's output, including error messages) is
+    stored in the `annotation` column, and is also copied to the `error`
+    column when `ToolMessage.error` is set, so failing tool calls can be
+    filtered directly.
+    """
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        tool_call = bound.arguments.get("message")
+
+        start_time = time.perf_counter()
+        response = func(self, *args, **kwargs)
+
+        log_tool_span(
+            name=tool_call.name,
+            duration_seconds=time.perf_counter() - start_time,
+            arguments=tool_call.arguments,
+            output=response.content,
+            error=response.content if response.error else None,
+        )
+        return response
 
     return wrapper

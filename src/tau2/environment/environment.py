@@ -17,6 +17,7 @@ from tau2.data_model.tasks import EnvAssertion, EnvFunctionCall, InitializationD
 from tau2.environment.db import DB
 from tau2.environment.tool import Tool
 from tau2.environment.toolkit import ToolKitBase, ToolSignature, get_tool_signatures
+from tau2.utils.tracing import trace_tool_call
 
 
 class EnvironmentInfo(BaseModel):
@@ -443,6 +444,7 @@ class Environment:
         if len(overlap) > 0:
             raise ValueError(f"Tool names overlap: {overlap}")
 
+    @trace_tool_call
     def get_response(self, message: ToolCall) -> ToolMessage:
         """
         Get the response of the domain. This also calls sync_tools.

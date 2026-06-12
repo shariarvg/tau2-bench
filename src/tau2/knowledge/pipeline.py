@@ -10,6 +10,7 @@ from tau2.knowledge.registry import (
     get_postprocessor,
     get_retriever,
 )
+from tau2.utils.tracing import trace_retrieval_call
 
 
 @dataclass
@@ -106,6 +107,7 @@ class RetrievalPipeline:
             self.state["doc_content_map"][doc_id] = content
             self.state["doc_title_map"][doc_id] = title
 
+    @trace_retrieval_call
     def retrieve(
         self, query: str, top_k: int = None, return_timing: bool = False
     ) -> List[Tuple[str, float]] | RetrievalResult:

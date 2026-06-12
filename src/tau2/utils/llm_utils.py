@@ -39,6 +39,7 @@ from tau2.data_model.message import (
     UserMessage,
 )
 from tau2.environment.tool import Tool
+from tau2.utils.tracing import trace_llm_call
 
 # Suppress Pydantic serialization warnings from LiteLLM
 # These occur due to type mismatches between streaming and non-streaming response types
@@ -352,6 +353,7 @@ def _write_llm_log(
         json.dump(call_data, f, indent=2)
 
 
+@trace_llm_call
 def generate(
     model: str,
     messages: list[Message],

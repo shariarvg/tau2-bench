@@ -157,6 +157,20 @@ def add_run_args(parser):
         help=f"The maximum number of concurrent simulations to run. Default is {DEFAULT_MAX_CONCURRENCY}.",
     )
     parser.add_argument(
+        "--trace-db",
+        action="store_true",
+        default=False,
+        help="Log per-LLM-call tracing spans (tokens, duration, tool calls, "
+        "errors, monitor annotations) to a SQLite database. Disabled by default.",
+    )
+    parser.add_argument(
+        "--trace-db-path",
+        type=str,
+        default=None,
+        help="Path to the SQLite database for span tracing (only used with "
+        "--trace-db). Default is data/traces/spans.db.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=DEFAULT_SEED,
@@ -632,6 +646,11 @@ def main():
         from tau2.utils.llm_utils import set_llm_log_mode
 
         set_llm_log_mode(args.llm_log_mode)
+
+        # Configure span tracing (writes per-LLM-call metadata to a SQLite db)
+        from tau2.utils.tracing import configure_tracing
+
+        configure_tracing(enabled=args.trace_db, db_path=args.trace_db_path)
 
         # Shared config kwargs
         shared_kwargs = dict(

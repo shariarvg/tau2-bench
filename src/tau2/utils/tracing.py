@@ -238,6 +238,115 @@ def log_tool_span(
     return span_id
 
 
+def log_retrieval_span(
+    *,
+    name: str,
+    query: str,
+    results: list[tuple[str, float]],
+    duration_seconds: Optional[float] = None,
+    timing: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> Optional[str]:
+    """Log one retrieval-pipeline span and return its span_id, or None if tracing is disabled.
+
+    Its parent is whichever LLM-call span most recently requested tool calls
+    (tracked via `current_parent_span_id`), same as `log_tool_span`. The
+    query, retrieved doc ids/scores, and pipeline timing breakdown are stored
+    as JSON in the `annotation` column.
+    """
+    conn = _get_connection()
+    if conn is None:
+        return None
+
+    span_id = str(uuid.uuid4())
+    trace_id = current_trace_id.get()
+    parent_span_id = current_parent_span_id.get()
+
+    annotation = {
+        "query": query,
+        "doc_ids": [doc_id for doc_id, _ in results],
+        "scores": [score for _, score in results],
+    }
+    if timing is not None:
+        annotation["timing"] = timing
+
+    with _db_lock:
+        conn.execute(
+            "INSERT INTO spans "
+            "(span_id, trace_id, parent_span_id, span_type, name, tools_called, "
+            "prompt_tokens, completion_tokens, duration_seconds, error, annotation, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                span_id,
+                trace_id,
+                parent_span_id,
+                "retrieval",
+                name,
+                None,
+                None,
+                None,
+                duration_seconds,
+                error,
+                json.dumps(annotation),
+                datetime.now().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    return span_id
+
+
+def trace_retrieval_call(func):
+    """Decorator that logs a retrieval span for each call to `func`.
+
+    Intended for `RetrievalPipeline.retrieve`. Reads `query` from the bound
+    arguments, and doc ids/scores/timing from the return value, which is
+    either a plain `list[(doc_id, score)]` or a `RetrievalResult` (when
+    `return_timing=True`) -- detected via duck-typing to avoid importing
+    `tau2.knowledge.pipeline` here.
+    """
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        query = bound.arguments.get("query")
+        name = ",".join(type(r).__name__ for r in getattr(self, "retrievers", []))
+
+        start_time = time.perf_counter()
+        try:
+            result = func(self, *args, **kwargs)
+        except Exception as e:
+            log_retrieval_span(
+                name=name,
+                query=query,
+                results=[],
+                duration_seconds=time.perf_counter() - start_time,
+                error=str(e),
+            )
+            raise
+
+        duration = time.perf_counter() - start_time
+        if hasattr(result, "results"):
+            results = result.results
+            timing = result.timing.to_dict() if hasattr(result.timing, "to_dict") else None
+        else:
+            results = result
+            timing = None
+
+        log_retrieval_span(
+            name=name,
+            query=query,
+            results=results,
+            duration_seconds=duration,
+            timing=timing,
+        )
+        return result
+
+    return wrapper
+
+
 def trace_llm_call(func):
     """Decorator that logs an LLM-call span for each call to `func`.
 

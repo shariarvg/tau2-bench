@@ -39,7 +39,7 @@ from tau2.data_model.message import (
     UserMessage,
 )
 from tau2.environment.tool import Tool
-from tau2.utils.tracing import log_llm_span
+from tau2.utils.tracing import trace_llm_call
 
 # Suppress Pydantic serialization warnings from LiteLLM
 # These occur due to type mismatches between streaming and non-streaming response types
@@ -353,6 +353,7 @@ def _write_llm_log(
         json.dump(call_data, f, indent=2)
 
 
+@trace_llm_call
 def generate(
     model: str,
     messages: list[Message],
@@ -416,11 +417,6 @@ def generate(
         )
     except Exception as e:
         logger.error(e)
-        log_llm_span(
-            name=call_name or model,
-            duration_seconds=time.perf_counter() - start_time,
-            error=str(e),
-        )
         raise e
     generation_time_seconds = time.perf_counter() - start_time
     cost = get_response_cost(response)
@@ -457,19 +453,6 @@ def generate(
         usage=usage,
         raw_data=response.to_dict(),
         generation_time_seconds=generation_time_seconds,
-    )
-
-    history = "\n".join(
-        f"{m.role}: {m.content}" for m in messages if getattr(m, "content", None)
-    )
-    log_llm_span(
-        name=call_name or model,
-        tools_called=[tc.name for tc in tool_calls] if tool_calls else None,
-        prompt_tokens=usage.get("prompt_tokens") if usage else None,
-        completion_tokens=usage.get("completion_tokens") if usage else None,
-        duration_seconds=generation_time_seconds,
-        content=content,
-        history=history or None,
     )
 
     # Log complete LLM call (request + response)

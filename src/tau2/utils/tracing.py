@@ -11,9 +11,12 @@ stashed in `current_parent_span_id` so the corresponding tool-call spans can
 pick it up as their parent.
 """
 
+import functools
+import inspect
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from contextvars import ContextVar
 from datetime import datetime
@@ -204,3 +207,51 @@ def log_tool_span(
         conn.commit()
 
     return span_id
+
+
+def trace_llm_call(func):
+    """Decorator that logs an LLM-call span for each call to `func`.
+
+    Intended for `tau2.utils.llm_utils.generate`. Reads `model`, `messages`,
+    and `call_name` from the call's bound arguments, and `tools_called`,
+    token usage, content, and duration from the returned message. On
+    exception, logs an error span with no message-derived fields.
+    """
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        model = bound.arguments.get("model")
+        messages = bound.arguments.get("messages") or []
+        call_name = bound.arguments.get("call_name")
+
+        start_time = time.perf_counter()
+        try:
+            message = func(*args, **kwargs)
+        except Exception as e:
+            log_llm_span(
+                name=call_name or model,
+                duration_seconds=time.perf_counter() - start_time,
+                error=str(e),
+            )
+            raise
+
+        usage = message.usage
+        tool_calls = message.tool_calls
+        history = "\n".join(
+            f"{m.role}: {m.content}" for m in messages if getattr(m, "content", None)
+        )
+        log_llm_span(
+            name=call_name or model,
+            tools_called=[tc.name for tc in tool_calls] if tool_calls else None,
+            prompt_tokens=usage.get("prompt_tokens") if usage else None,
+            completion_tokens=usage.get("completion_tokens") if usage else None,
+            duration_seconds=message.generation_time_seconds,
+            content=message.content,
+            history=history or None,
+        )
+        return message
+
+    return wrapper

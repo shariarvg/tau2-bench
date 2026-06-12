@@ -25,10 +25,28 @@ from typing import Optional
 
 from tau2.utils.utils import DATA_DIR
 
-TRACE_DB_PATH = DATA_DIR / "traces" / "spans.db"
+DEFAULT_TRACE_DB_PATH = DATA_DIR / "traces" / "spans.db"
 
 # call_names whose response content should be passed to the monitor agents.
 MONITORED_CALL_NAMES = {"agent_response"}
+
+# Whether span logging is active, and where the SQLite database lives. Set
+# via `configure_tracing` (the `tau2 run` CLI wires this to --trace-db /
+# --trace-db-path). Disabled by default: no DB file is created unless a run
+# opts in.
+_tracing_enabled = False
+_trace_db_path: Path = DEFAULT_TRACE_DB_PATH
+
+
+def configure_tracing(enabled: bool, db_path: Optional[Path] = None) -> None:
+    """Enable/disable span logging and optionally set the SQLite database path.
+
+    Call this once before running any simulations.
+    """
+    global _tracing_enabled, _trace_db_path
+    _tracing_enabled = enabled
+    if db_path is not None:
+        _trace_db_path = Path(db_path)
 
 # The simulation (trace) currently running on this thread.
 current_trace_id: ContextVar[Optional[str]] = ContextVar(
@@ -62,12 +80,17 @@ CREATE TABLE IF NOT EXISTS spans (
 """
 
 
-def _get_connection() -> sqlite3.Connection:
-    """Get a connection local to this thread, creating the DB/table if needed."""
+def _get_connection() -> Optional[sqlite3.Connection]:
+    """Get a connection local to this thread, creating the DB/table if needed.
+
+    Returns None if tracing is disabled (see `configure_tracing`).
+    """
+    if not _tracing_enabled:
+        return None
     conn = getattr(_local, "conn", None)
     if conn is None:
-        TRACE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(TRACE_DB_PATH, timeout=30)
+        _trace_db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(_trace_db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         with _db_lock:
             conn.execute(_SCHEMA)
@@ -118,8 +141,8 @@ def log_llm_span(
     error: Optional[str] = None,
     content: Optional[str] = None,
     history: Optional[str] = None,
-) -> str:
-    """Log one LLM-call span and return its span_id.
+) -> Optional[str]:
+    """Log one LLM-call span and return its span_id, or None if tracing is disabled.
 
     LLM-call spans are always top-level (parent_span_id=None). If the call
     requested tool calls, this span's id is stashed in
@@ -131,6 +154,10 @@ def log_llm_span(
     for a known failure mode, and the combined JSON result is stored in the
     `annotation` column, instead of storing the full response content.
     """
+    conn = _get_connection()
+    if conn is None:
+        return None
+
     span_id = str(uuid.uuid4())
     trace_id = current_trace_id.get()
     tools_called = tools_called or []
@@ -139,7 +166,6 @@ def log_llm_span(
     if name in MONITORED_CALL_NAMES and content:
         annotation = _get_monitor_annotations(content, history=history)
 
-    conn = _get_connection()
     with _db_lock:
         conn.execute(
             "INSERT INTO spans "
@@ -172,17 +198,20 @@ def log_tool_span(
     name: str,
     duration_seconds: Optional[float] = None,
     error: Optional[str] = None,
-) -> str:
-    """Log one tool-execution span and return its span_id.
+) -> Optional[str]:
+    """Log one tool-execution span and return its span_id, or None if tracing is disabled.
 
     Its parent is whichever LLM-call span most recently requested tool calls
     (tracked via `current_parent_span_id`).
     """
+    conn = _get_connection()
+    if conn is None:
+        return None
+
     span_id = str(uuid.uuid4())
     trace_id = current_trace_id.get()
     parent_span_id = current_parent_span_id.get()
 
-    conn = _get_connection()
     with _db_lock:
         conn.execute(
             "INSERT INTO spans "

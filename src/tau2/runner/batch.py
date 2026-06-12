@@ -48,6 +48,7 @@ from tau2.runner.checkpoint import (
 from tau2.runner.helpers import get_info, get_tasks, make_run_name
 from tau2.runner.progress import StatusMonitor, run_with_retry
 from tau2.runner.simulation import run_simulation
+from tau2.utils.tracing import end_trace, start_trace
 from tau2.user.user_simulator import (
     get_global_user_sim_guidelines,
     get_global_user_sim_guidelines_voice,
@@ -275,6 +276,8 @@ class _TaskLogContext:
         self._handler_id = None
 
     def __enter__(self):
+        start_trace(self.simulation_id)
+
         if self.save_dir:
             self.task_log_dir = (
                 self.save_dir
@@ -330,6 +333,7 @@ class _TaskLogContext:
         if self._handler_id is not None:
             logger.remove(self._handler_id)
             _current_simulation_id.set(None)
+        end_trace()
         return False
 
 

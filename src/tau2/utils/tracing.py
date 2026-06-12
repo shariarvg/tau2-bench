@@ -24,6 +24,14 @@ from tau2.utils.utils import DATA_DIR
 
 TRACE_DB_PATH = DATA_DIR / "traces" / "spans.db"
 
+# call_names whose response content should be passed to the monitor agent.
+MONITORED_CALL_NAMES = {"agent_response"}
+
+# Cheap model used by the monitor agent. Logged under this call_name so its
+# own LLM call is never itself monitored (avoids recursion).
+MONITOR_MODEL = "gpt-4o-mini"
+MONITOR_CALL_NAME = "monitor_certainty"
+
 # The simulation (trace) currently running on this thread.
 current_trace_id: ContextVar[Optional[str]] = ContextVar(
     "current_trace_id", default=None
@@ -50,6 +58,7 @@ CREATE TABLE IF NOT EXISTS spans (
     completion_tokens INTEGER,
     duration_seconds REAL,
     error TEXT,
+    annotation TEXT,
     timestamp TEXT NOT NULL
 )
 """
@@ -81,6 +90,41 @@ def end_trace() -> None:
     current_parent_span_id.set(None)
 
 
+def _get_monitor_annotation(content: str) -> Optional[dict]:
+    """Run a cheap monitor LLM call to annotate an agent response.
+
+    Returns a small JSON-able dict (e.g. capturing certainty vs. uncertainty)
+    or None if the monitor call fails for any reason. Best-effort only: this
+    must never break the main simulation.
+    """
+    # Imported lazily to avoid a circular import (llm_utils imports
+    # log_llm_span from this module).
+    from tau2.data_model.message import SystemMessage, UserMessage
+    from tau2.utils.llm_utils import extract_json_from_llm_response, generate
+
+    try:
+        response = generate(
+            model=MONITOR_MODEL,
+            messages=[
+                SystemMessage(
+                    role="system",
+                    content=(
+                        "You are monitoring a customer-service agent's response. "
+                        "Reply with a JSON object of the form "
+                        '{"certainty": "high" | "medium" | "low"} '
+                        "indicating how certain the agent sounds about its answer "
+                        "or next action. Reply with only the JSON object."
+                    ),
+                ),
+                UserMessage(role="user", content=content),
+            ],
+            call_name=MONITOR_CALL_NAME,
+        )
+        return json.loads(extract_json_from_llm_response(response.content or ""))
+    except Exception:
+        return None
+
+
 def log_llm_span(
     *,
     name: str,
@@ -89,6 +133,7 @@ def log_llm_span(
     completion_tokens: Optional[int] = None,
     duration_seconds: Optional[float] = None,
     error: Optional[str] = None,
+    content: Optional[str] = None,
 ) -> str:
     """Log one LLM-call span and return its span_id.
 
@@ -96,18 +141,27 @@ def log_llm_span(
     requested tool calls, this span's id is stashed in
     `current_parent_span_id` so future tool-call spans can reference it as
     their parent.
+
+    If `name` is in `MONITORED_CALL_NAMES` and `content` is provided, a cheap
+    monitor LLM call annotates the response (e.g. with a certainty estimate)
+    and the resulting JSON is stored in the `annotation` column, instead of
+    storing the full response content.
     """
     span_id = str(uuid.uuid4())
     trace_id = current_trace_id.get()
     tools_called = tools_called or []
+
+    annotation = None
+    if name in MONITORED_CALL_NAMES and content:
+        annotation = _get_monitor_annotation(content)
 
     conn = _get_connection()
     with _db_lock:
         conn.execute(
             "INSERT INTO spans "
             "(span_id, trace_id, parent_span_id, span_type, name, tools_called, "
-            "prompt_tokens, completion_tokens, duration_seconds, error, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prompt_tokens, completion_tokens, duration_seconds, error, annotation, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 span_id,
                 trace_id,
@@ -119,6 +173,7 @@ def log_llm_span(
                 completion_tokens,
                 duration_seconds,
                 error,
+                json.dumps(annotation) if annotation is not None else None,
                 datetime.now().isoformat(),
             ),
         )
@@ -148,8 +203,8 @@ def log_tool_span(
         conn.execute(
             "INSERT INTO spans "
             "(span_id, trace_id, parent_span_id, span_type, name, tools_called, "
-            "prompt_tokens, completion_tokens, duration_seconds, error, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prompt_tokens, completion_tokens, duration_seconds, error, annotation, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 span_id,
                 trace_id,
@@ -161,6 +216,7 @@ def log_tool_span(
                 None,
                 duration_seconds,
                 error,
+                None,
                 datetime.now().isoformat(),
             ),
         )

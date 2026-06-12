@@ -465,6 +465,7 @@ def generate(
         prompt_tokens=usage.get("prompt_tokens") if usage else None,
         completion_tokens=usage.get("completion_tokens") if usage else None,
         duration_seconds=generation_time_seconds,
+        content=content,
     )
 
     # Log complete LLM call (request + response)
